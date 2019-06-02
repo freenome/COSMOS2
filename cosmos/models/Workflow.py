@@ -529,7 +529,7 @@ def _run(workflow, session, task_queue):
 
         for task in _process_finished_tasks(workflow.jobmanager):
             if task.status == TaskStatus.failed and not task.must_succeed:
-                pass  # it's ok if the task failed
+                task_queue.remove_node(task)  # pop the task, it's ok if the task failed
 
             elif task.status == TaskStatus.failed and task.must_succeed:
 
