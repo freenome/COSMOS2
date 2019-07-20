@@ -98,9 +98,14 @@ class DRM_K8S_Jobs(DRM):  # noqa
         if task_status.get('active'):
             return None
 
+        # Check if job has already started
+        start_time_raw = task_status.get('startTime')
+        if start_time_raw is None:
+            return None
+
         successful = task_status.get('succeeded')
         exit_code = 0 if successful else 1
-        start_time = dateutil.parser.parse(task_status['startTime'])
+        start_time = dateutil.parser.parse(start_time_raw)
 
         if successful:
             end_time_iso8601 = task_status['completionTime']
