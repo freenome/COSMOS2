@@ -33,8 +33,7 @@ def test_ex2():
 
 def test_ex3():
     path = os.path.join(os.path.dirname(__file__), '../examples/analysis_output/ex3')
-    if not os.path.exists(path):
-        os.mkdir(path)
+    os.makedirs(path, exist_ok=True)
     if sys.version_info > (3, 6):
         with cd(path):
             run('python ../../ex3.py')

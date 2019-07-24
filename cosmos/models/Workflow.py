@@ -3,6 +3,7 @@ Tools for defining, running and terminating Cosmos workflows.
 """
 
 import atexit
+import copy
 import datetime
 import getpass
 import os
@@ -13,6 +14,7 @@ import types
 
 import funcsigs
 
+from collections import defaultdict
 from sqlalchemy import orm
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declared_attr
@@ -29,8 +31,16 @@ from cosmos.util.sqla import Enum_ColumnType, MutableDict, JSONEncodedDict
 from cosmos.db import Base
 from cosmos.core.cmd_fxn import signature
 
-from cosmos import TaskStatus, StageStatus, WorkflowStatus, signal_workflow_status_change
-from cosmos.models.Task import Task
+from cosmos import (
+    TaskStatus,
+    StageStatus,
+    WorkflowStatus,
+    signal_workflow_status_change,
+    signal_processed_finished_tasks,
+    signal_workflow_run_ended,
+    COMPLETED_TASK_STATUSES
+)
+from cosmos.models.Task import Task, GetOutputError
 
 opj = os.path.join
 
@@ -193,7 +203,7 @@ class Workflow(Base):
 
         # uid
         if uid is None:
-            raise AssertionError, 'uid parameter must be specified'
+            raise AssertionError('uid parameter must be specified')
             # Fix me assert params are all JSONable
             # uid = str(params)
         else:
@@ -276,8 +286,18 @@ class Workflow(Base):
 
             task.cmd_fxn = func
 
-            task.drm_options = drm_options if drm_options is not None else self.cosmos_app.default_drm_options
+            # Set task DRM options
+            if drm_options is None:
+                task.drm_options = self.cosmos_app.default_drm_options
+            else:
+                final_drm_options = copy.deepcopy(
+                    self.cosmos_app.default_drm_options)
+                final_drm_options.update(drm_options)
+                task.drm_options = final_drm_options
             DRM.validate_drm_options(task.drm, task.drm_options)
+
+            # Initialize task DRM state
+            task.drm_state = {}
 
         # Add Stage Dependencies
         for p in parents:
@@ -411,14 +431,17 @@ class Workflow(Base):
         except Exception as ex:
             self.log.fatal(ex, exc_info=True)
             raise
+        finally:
+            signal_workflow_run_ended.send(self)
 
     def terminate(self, due_to_failure=True):
         self.log.warning('Terminating %s!' % self)
         if self.jobmanager:
-            self.log.info('Processing finished tasks and terminating {num_running_tasks} running tasks'.format(
-                num_running_tasks=len(self.jobmanager.running_tasks),
-            ))
-            _process_finished_tasks(self.jobmanager)
+            self.log.info(
+                'Terminating {num_running_tasks} running tasks'.format(
+                    num_running_tasks=len(self.jobmanager.running_tasks),
+                )
+            )
             self.jobmanager.terminate()
 
         if due_to_failure:
@@ -430,9 +453,6 @@ class Workflow(Base):
 
     def cleanup(self):
         if self.jobmanager:
-            self.log.info('Cleaning up {num_dead_tasks} dead tasks'.format(
-                num_dead_tasks=len(self.jobmanager.dead_tasks),
-            ))
             self.jobmanager.cleanup()
 
     @property
@@ -520,32 +540,50 @@ def _run(workflow, session, task_queue):
     Do the workflow!
     """
     workflow.log.info('Executing TaskGraph')
+
+    # Initially all cores should be available
     available_cores = True
 
+    # Free up available cores by processing finished tasks
     while len(task_queue) > 0:
-        if available_cores:
-            _run_queued_and_ready_tasks(task_queue, workflow)
-            available_cores = False
+        # Flag to indicate that workflow should be terminated at the end of
+        # this loop if any irrecoverable task failures are observed
+        terminate_due_to_failure = False
+
+        # Placeholder for finished tasks
+        finished_tasks_by_status = defaultdict(set)
 
         for task in _process_finished_tasks(workflow.jobmanager):
-            if task.status == TaskStatus.failed and not task.must_succeed:
-                task_queue.remove_node(task)  # pop the task, it's ok if the task failed
+            # Collect and track completed tasks
+            if task.status in COMPLETED_TASK_STATUSES:
+                finished_tasks_by_status[task.status].add(task)
 
-            elif task.status == TaskStatus.failed and task.must_succeed:
+            if task.status == TaskStatus.failed:
+                if not task.must_succeed:
+                    # pop the task, it's ok if the task failed
+                    task_queue.remove_node(task)
+                else:
+                    if workflow.info['fail_fast']:
+                        workflow.log.info(
+                            'Task %s failed with exit status: %s. '
+                            '%s will exit run loop at next available '
+                            'opportunity.',
+                            task,
+                            task.exit_status,
+                            workflow
+                        )
+                        terminate_due_to_failure = True
+                        continue
 
-                if workflow.info['fail_fast']:
-                    workflow.log.info('%s Exiting run loop at first Task failure, exit_status: %s: %s',
-                                      workflow, task.exit_status, task)
-                    workflow.terminate(due_to_failure=True)
-                    return
+                    # pop all descendents when a task fails; the rest of the
+                    # graph can still execute
+                    remove_nodes = descendants(task_queue, task).union({task})
+                    # graph_failed.add_edges(task_queue.subgraph(remove_nodes).edges())
 
-                # pop all descendents when a task fails; the rest of the graph can still execute
-                remove_nodes = descendants(task_queue, task).union({task, })
-                # graph_failed.add_edges(task_queue.subgraph(remove_nodes).edges())
-
-                task_queue.remove_nodes_from(remove_nodes)
-                workflow.status = WorkflowStatus.failed_but_running
-                workflow.log.info('%s tasks left in the queue' % len(task_queue))
+                    task_queue.remove_nodes_from(remove_nodes)
+                    workflow.status = WorkflowStatus.failed_but_running
+                    workflow.log.info(
+                        '%s tasks left in the queue' % len(task_queue))
             elif task.status == TaskStatus.successful:
                 # just pop this task
                 task_queue.remove_node(task)
@@ -553,18 +591,40 @@ def _run(workflow, session, task_queue):
                 # the task must have failed, and is being reattempted
                 pass
             else:
-                raise AssertionError('Unexpected finished task status %s for %s' % (task.status, task))
+                raise AssertionError(
+                    'Unexpected finished task status %s for %s' % (
+                        task.status, task)
+                )
             available_cores = True
 
         # only commit Task changes after processing a batch of finished ones
         session.commit()
 
+        # If cores are available and this workflow is not scheduled to be
+        # terminated, submit more jobs
+        if available_cores and not terminate_due_to_failure:
+            _run_queued_and_ready_tasks(task_queue, workflow)
+            available_cores = False
+
+        # Signal that finished tasks were processed in this iteration
+        if finished_tasks_by_status:
+            signal_processed_finished_tasks.send(finished_tasks_by_status)
+
+        # If a task failure should result in workflow termination,
+        # end here
+        if terminate_due_to_failure:
+            workflow.terminate(due_to_failure=True)
+            return
+
         # conveniently, this returns early if we catch a signal
         time.sleep(workflow.jobmanager.poll_interval)
 
         if workflow.termination_signal:
-            workflow.log.info('%s Early termination requested (%d): stopping workflow',
-                              workflow, workflow.termination_signal)
+            workflow.log.info(
+                '%s Early termination requested (%d): stopping workflow',
+                workflow,
+                workflow.termination_signal
+            )
             workflow.terminate(due_to_failure=False)
             return
 
@@ -581,14 +641,18 @@ def _run_queued_and_ready_tasks(task_queue, workflow):
         cores_left = max_cores - cores_used
 
         submittable_tasks = []
-        ready_tasks = sorted(ready_tasks, key=lambda t: (t.core_req, t.id))
-        while len(ready_tasks) > 0:
-            task = ready_tasks[0]
+        ready_tasks = sorted(
+            ready_tasks,
+            key=lambda t: (t.core_req, t.id),
+            reverse=True
+        )
+        while ready_tasks:
+            task = ready_tasks[-1]
             there_are_cores_left = task.core_req <= cores_left
             if there_are_cores_left:
                 cores_left -= task.core_req
                 submittable_tasks.append(task)
-                ready_tasks.pop(0)
+                ready_tasks.pop()
             else:
                 break
 
@@ -603,12 +667,30 @@ def _run_queued_and_ready_tasks(task_queue, workflow):
 
 def _process_finished_tasks(jobmanager):
     for task in jobmanager.get_finished_tasks():
-        if task.NOOP or task.exit_status == 0:
+        if task.NOOP:
             task.status = TaskStatus.successful
-            yield task
+        # An exit status of None is indicative of a task that was lost
+        # by the DRM layer.
+        elif task.exit_status is None:
+            task.status = TaskStatus.lost
+        # Task completed with exit status. Extract logs for this task and
+        # set the appropriate status
         else:
-            task.status = TaskStatus.failed
-            yield task
+            try:
+                jobmanager.get_drm(task.drm).populate_logs(task)
+            except GetOutputError as e:
+                task.log.warning(str(e))
+                # DRM could not fetch the logs for this task. Consider this
+                # an irrecoverable error and flag the task for requeuing
+                task.status = TaskStatus.lost
+            else:
+                task.status = (
+                    TaskStatus.successful
+                    if task.exit_status == 0 else
+                    TaskStatus.failed
+                )
+
+        yield task
 
 
 def handle_exits(workflow, do_atexit=True):

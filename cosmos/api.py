@@ -12,7 +12,7 @@ from decorator import decorator
 
 from cosmos import WorkflowStatus, StageStatus, TaskStatus, NOOP, signal_workflow_status_change, \
     signal_stage_status_change, signal_task_status_change, \
-    Dependency
+    signal_processed_finished_tasks, signal_workflow_run_ended, Dependency
 from cosmos.core.cmd_fxn.signature import default_cmd_fxn_wrapper
 from cosmos.graph.draw import draw_task_graph, draw_stage_graph, pygraphviz_available
 from cosmos.models.Cosmos import Cosmos, default_get_submit_args

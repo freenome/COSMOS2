@@ -1,22 +1,18 @@
-import itertools as it
 import os
 import stat
-from operator import attrgetter
 
 from cosmos import TaskStatus, StageStatus, NOOP
 from cosmos.job.drm.DRM_Base import DRM
 from cosmos.models.Workflow import default_task_log_output_dir
-from cosmos.util.helpers import mkdir
+from cosmos.util.helpers import groupby2, mkdir
 
 
 class JobManager(object):
     def __init__(self, get_submit_args, log_out_dir_func=default_task_log_output_dir, cmd_wrapper=None):
         self.drms = {DRM_sub_cls.name: DRM_sub_cls(self) for DRM_sub_cls in DRM.__subclasses__()}
 
-        # self.local_drm = DRM_Local(self)
-        self.tasks = []
-        self.running_tasks = []
-        self.dead_tasks = []
+        self.tasks = set()
+        self.running_tasks = set()
         self.get_submit_args = get_submit_args
         self.cmd_wrapper = cmd_wrapper
         self.log_out_dir_func = log_out_dir_func
@@ -55,7 +51,6 @@ class JobManager(object):
 
         if task.NOOP:
             task.status = TaskStatus.submitted
-            return
         else:
             mkdir(task.log_dir)
 
@@ -66,8 +61,8 @@ class JobManager(object):
             self.get_drm(task.drm).submit_job(task)
 
     def run_tasks(self, tasks):
-        self.running_tasks += tasks
-        self.tasks += tasks
+        self.running_tasks.update(tasks)
+        self.tasks.update(tasks)
 
         # Run the cmd_fxns in parallel, but do not submit any jobs they return
         # Note we use the cosmos_app thread_pool here so we don't have to setup/teardown threads
@@ -83,20 +78,32 @@ class JobManager(object):
     def terminate(self):
         """Kills all tasks in a workflow.
         """
-        get_drm = lambda t: t.drm
-
-        for drm, tasks in it.groupby(sorted(self.running_tasks, key=get_drm), get_drm):
-            drm = self.get_drm(drm)
-            target_tasks = list([t for t in tasks if t.drm_jobID is not None])
-            drm.kill_tasks(target_tasks)
-            for task in target_tasks:
+        for drm, tasks_iter in groupby2(self.running_tasks, lambda t: t.drm):
+            tasks = list(tasks_iter)
+            self.get_drm(drm).kill_tasks(
+                [t for t in tasks if t.drm_jobID is not None])
+            for task in tasks:
+                self.running_tasks.remove(task)
                 task.status = TaskStatus.killed
                 task.stage.status = StageStatus.killed
 
+    def cleanup_task(self, task):
+        """Cleanup one specific task in a workflow."""
+        # Sanity check to make sure that the task is indeed managed by this
+        # job manager
+        assert task in self.tasks, 'Could not find task %s' % task
+
+        # Get task's DRM to clean up task resources
+        if not task.NOOP:
+            self.get_drm(task.drm).cleanup_task(task)
+
+        # Remove task from relevant lists
+        self.tasks.remove(task)
+
     def cleanup(self):
         """Cleanup a workflow."""
-        for task in self.tasks:
-            self.get_drm(task.drm).cleanup_task(task)
+        for task in list(self.tasks):
+            self.cleanup_task(task)
 
     def get_finished_tasks(self):
         """
@@ -107,17 +114,16 @@ class JobManager(object):
             # task may have failed if submission failed
             if task.NOOP:
                 self.running_tasks.remove(task)
-                self.dead_tasks.append(task)
                 yield task
 
-            assert task.status not in [TaskStatus.failed], 'invalid: %s' % task.status
+            assert task.status != TaskStatus.failed, (
+                'Invalid status for running task %s: %s' % (task, task.status))
 
         # For the rest, ask its DRM if it is done
-        f = attrgetter('drm')
-        for drm, tasks in it.groupby(sorted(self.running_tasks, key=f), f):
-            for task, job_info_dict in self.get_drm(drm).filter_is_done(list(tasks)):
+        for drm, tasks_iter in groupby2(self.running_tasks, lambda t: t.drm):
+            tasks = list(tasks_iter)
+            for task, job_info_dict in self.get_drm(drm).filter_is_done(tasks):
                 self.running_tasks.remove(task)
-                self.dead_tasks.append(task)
                 for k, v in job_info_dict.items():
                     setattr(task, k, v)
                 yield task
@@ -126,8 +132,8 @@ class JobManager(object):
     def poll_interval(self):
         if not self.running_tasks:
             return 0
-        return max(self.get_drm(d).poll_interval for d in
-                   set(t.drm for t in self.running_tasks))
+        drms_in_use = set(t.drm for t in self.running_tasks)
+        return max(self.get_drm(d).poll_interval for d in drms_in_use)
 
 
 def _create_command_sh(task, command):

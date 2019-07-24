@@ -12,10 +12,17 @@ from sqlalchemy.orm import reconstructor, relationship, synonym
 from sqlalchemy.schema import Column, ForeignKey, UniqueConstraint
 from sqlalchemy.types import Boolean, DateTime, Integer, String
 
-from cosmos import StageStatus, TaskStatus, signal_task_status_change
+from cosmos import (
+    StageStatus,
+    TaskStatus,
+    READY_FOR_CLEANUP,
+    signal_task_status_change
+)
 from cosmos.db import Base
 from cosmos.util.helpers import wait_for_file
 from cosmos.util.sqla import Enum_ColumnType, JSONEncodedDict, MutableDict
+
+TIMED_OUT_EXIT_STATUS = 124
 
 
 class ExpectedError(Exception): pass
@@ -47,13 +54,11 @@ task_printout = u"""Task Info:
 """
 
 
-completed_task_statuses = {TaskStatus.failed, TaskStatus.killed, TaskStatus.successful}
-
-
 @signal_task_status_change.connect
 def task_status_changed(task):
-    if task.status in completed_task_statuses:
-        task.workflow.jobmanager.get_drm(task.drm).populate_logs(task)
+    # Clean up this task, if necessary
+    if task.status in READY_FOR_CLEANUP:
+        task.workflow.jobmanager.cleanup_task(task)
 
     if task.status == TaskStatus.waiting:
         task.started_on = datetime.datetime.now()
@@ -66,6 +71,12 @@ def task_status_changed(task):
                 (task, task.status, repr(task.drm), repr(task.drm_jobID),
                  repr(task.job_class), repr(task.queue)))
         task.submitted_on = datetime.datetime.now()
+
+    # If a task was lost by the DRM, simply mark it as not attempted and
+    # requeue
+    elif task.status == TaskStatus.lost:
+        task.log.warn('Requeuing %s' % task)
+        task.status = TaskStatus.no_attempt
 
     elif task.status == TaskStatus.failed:
         if not task.must_succeed:
@@ -80,7 +91,7 @@ def task_status_changed(task):
             # check is purely cosmetic, but if we do more here, then
             # FIXME we should have a DRM-agnostic way of determining timed-out tasks.
             #
-            if task.exit_status == 124:
+            if task.exit_status == TIMED_OUT_EXIT_STATUS:
                 exit_reason = 'timed out'
             else:
                 exit_reason = 'failed'
@@ -109,7 +120,6 @@ def task_status_changed(task):
         task.finished_on = datetime.datetime.now()
         if all(t.successful or not t.must_succeed for t in task.stage.tasks):
             task.stage.status = StageStatus.successful
-        task.session.commit()
 
 
 # task_edge_table = Table('task_edge', Base.metadata,
@@ -163,7 +173,8 @@ class Task(Base):
     # FIXME causes a problem with mysql?
     __table_args__ = (UniqueConstraint('stage_id', 'uid', name='_uc1'),)
 
-    drm_options = {}
+    drm_options = None
+    drm_state = None
 
     id = Column(Integer, primary_key=True)
     uid = Column(String(255), index=True)

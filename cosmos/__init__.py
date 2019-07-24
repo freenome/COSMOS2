@@ -89,6 +89,8 @@ import blinker
 signal_task_status_change = blinker.Signal()
 signal_stage_status_change = blinker.Signal()
 signal_workflow_status_change = blinker.Signal()
+signal_processed_finished_tasks = blinker.Signal()
+signal_workflow_run_ended = blinker.Signal()
 
 ########################################################################################################################
 # Enums
@@ -111,6 +113,13 @@ class TaskStatus(MyEnum):
     successful = 'Finished successfully'
     failed = 'Finished, but failed'
     killed = 'Manually killed'
+    lost = 'Submitted to the job manager, but cannot be found'
+
+
+COMPLETED_TASK_STATUSES = {TaskStatus.failed, TaskStatus.successful}
+READY_FOR_CLEANUP = (
+    COMPLETED_TASK_STATUSES | {TaskStatus.killed, TaskStatus.lost})
+
 
 class StageStatus(MyEnum):
     no_attempt = 'Has not been attempted',

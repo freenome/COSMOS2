@@ -169,6 +169,9 @@ def get_logger(name, path=None):
 
     :returns: (logger, True if the logger was initialized, else False)
     """
+    # Allow override of log level from environment variable
+    log_level = os.getenv('COSMOS_LOG_LEVEL', 'INFO')
+
     log = logging.getLogger(name)
     log.propagate = False
     #logging.basicConfig(level=logging.DEBUG)
@@ -177,19 +180,19 @@ def get_logger(name, path=None):
     if len(log.handlers) > 0:
         return log
 
-    log.setLevel(logging.DEBUG)
+    log.setLevel(log_level)
     # create file handler which logs debug messages
     if path:
         d = os.path.dirname(path)
         assert d == '' or os.path.exists(d), \
             'Cannot write to %s from %s' % (path, os.getcwd())
         fh = logging.FileHandler(path)
-        fh.setLevel(logging.DEBUG)
+        fh.setLevel(log_level)
         fh.setFormatter(logging.Formatter('%(levelname)s: %(asctime)s: %(message)s', "%Y-%m-%d %H:%M:%S"))
         log.addHandler(fh)
 
     ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
+    ch.setLevel(log_level)
     ch.setFormatter(logging.Formatter('%(levelname)s: %(asctime)s: %(message)s', "%Y-%m-%d %H:%M:%S"))
     log.addHandler(ch)
 

@@ -7,7 +7,7 @@ from sqlalchemy import inspect as sqlalchemy_inspect
 
 from cosmos.api import TaskStatus
 from cosmos.job.drm.DRM_Base import DRM
-from cosmos.models.Task import Task
+from cosmos.models.Task import Task, GetOutputError
 from cosmos.util.retry import retry_call
 
 
@@ -152,10 +152,15 @@ class DRM_K8S_Jobs(DRM):  # noqa
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
 
-        sp.call(stream_logs_cmd,
-                 stdout=open(task.output_stdout_path, 'w'),
-                 stderr=open(task.output_stderr_path, 'w'),
-                 shell=True)
+        exit_code = sp.call(
+            stream_logs_cmd,
+            stdout=open(task.output_stdout_path, 'w'),
+            stderr=open(task.output_stderr_path, 'w'),
+            shell=True
+        )
+        if exit_code != 0:
+            raise GetOutputError(
+                'Error fetching logs for {task}'.format(task=task))
 
     def kill(self, task):
         job_id = task.drm_jobID
