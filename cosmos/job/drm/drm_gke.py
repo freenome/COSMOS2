@@ -1,5 +1,5 @@
-import copy
 import base64
+import copy
 import functools
 import os
 import random
@@ -8,12 +8,12 @@ import shutil
 import string
 
 from abc import abstractmethod, ABCMeta
-from datetime import datetime
+from datetime import datetime, timedelta
 from cosmos.api import TaskStatus
 from cosmos.job.drm.DRM_Base import DRM
 from cosmos.models.Task import GetOutputError, Task, TIMED_OUT_EXIT_STATUS
 from cosmos.util.helpers import groupby2
-from enum import Enum
+from enum import auto, Enum
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from sqlalchemy import inspect as sqlalchemy_inspect
@@ -40,7 +40,6 @@ KUBERNETES_LABEL_RE = re.compile(
     r'^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$')
 KUBERNETES_INVALID_LABEL = 'INVALID'
 KUBERNETES_MAX_NAME_LENGTH = 63
-KUBERNETES_OBJ_DELETION_GRACE_PERIOD = 10
 KUBERNETES_POD_CHECK_ENVVAR = 'KUBERNETES_SERVICE_HOST'
 PARENT_WORKFLOW_POD_NAME_ENVVAR = '__POD_NAME__'
 PARENT_WORKFLOW_POD_UID_ENVVAR = '__POD_UID__'
@@ -48,10 +47,12 @@ GKE_POD_UNKNOWN_STATUS = 'Unknown'
 DEFAULT_PV_STORAGE_CLASS = 'ssd'
 SCRATCH_VOLUME_MOUNT_PATH = '/scratch'
 LOGS_STREAM_CHUNK_SIZE = 128 * 1024  # 128 KB
-LOGS_CONNECTION_TIMEOUT = 3
-LOGS_READ_TIMEOUT = 1
-PENDING_TOLERATION_SECONDS = 1800  # 30 minutes
-PREEMPTIBLE_TOLERATION_SECONDS = 7200  # 2 hours
+LOGS_CONNECTION_TIMEOUT = timedelta(seconds=3)
+LOGS_READ_TIMEOUT = timedelta(seconds=1)
+PREEMPTIBLE_NODE_LABEL = 'cloud.google.com/gke-preemptible'
+PREEMPTIBLE_START_GRACE_PERIOD = timedelta(hours=2)
+LONG_RUNNING_JOB_THRESHOLD = timedelta(hours=4)
+NODE_PARTITION_LABEL_KEY = 'partition'
 
 
 def _remove_null_dict(**kwargs):
@@ -167,6 +168,16 @@ class GkeDRMOptions(NamedTuple):
 
 OPTIONAL_FIELDS = set(GkeDRMOptions._field_defaults.keys())
 REQUIRED_FIELDS = set(GkeDRMOptions._fields) - OPTIONAL_FIELDS
+
+
+class NonPreemptibleCondition(Enum):
+    LONG_RUNNING_JOB = auto()
+    OUT_OF_START_GRACE_PERIOD = auto()
+
+
+TEMPORARY_NON_PREEMPTIBLE_CONDS = (
+    NonPreemptibleCondition.OUT_OF_START_GRACE_PERIOD,
+)
 
 
 class PodTolerationEffect(Enum):
@@ -539,8 +550,8 @@ class WrappedTaskStateVariable(object):
 class WrappedTask(object):
     attached_volumes = WrappedTaskStateVariable('attached_volumes', dict)
     scheduled_time = WrappedTaskStateVariable('scheduled_time')
-    force_non_preemptible = WrappedTaskStateVariable(
-        'force_non_preemptible', False)
+    non_preemptible_conds = WrappedTaskStateVariable(
+        'non_preemptible_conds', set)
 
     def __init__(self, task):
         super().__init__()
@@ -569,7 +580,7 @@ class WrappedTask(object):
 
     @property
     def preemptible(self):
-        return self.options.preemptible and not self.force_non_preemptible
+        return self.options.preemptible and not self.non_preemptible_conds
 
     @property
     def options(self):
@@ -804,23 +815,64 @@ class WrappedTask(object):
 
     @property
     def pod_node_selectors(self):
-        data = _remove_null_dict(
-            partition=self.options.partition,
-            **self.options.node_selectors or {}
-        )
+        # Hard requirement to schedule non-preemptible pods on non-preemptible
+        # nodes.
+        if not self.preemptible:
+            yield client.V1NodeSelectorRequirement(
+                key=PREEMPTIBLE_NODE_LABEL,
+                operator='DoesNotExist'
+            )
 
-        return data
+        # Handle remaining node selectors
+        data = self.options.node_selectors or {}
+        # Set the node partition for this task, if necessary
+        if self.options.partition:
+            data[NODE_PARTITION_LABEL_KEY] = self.options.partition
+
+        for key, value in data.items():
+            yield client.V1NodeSelectorRequirement(
+                key=key,
+                operator='In' if value is not None else 'Exists',
+                values=[value] if value is not None else []
+            )
+
+    @property
+    def pod_scheduling_preferences(self):
+        # Preemptible pods are preferred to be scheduled on preemptible
+        # nodes but may be scheduled on non-preemptible nodes if the former is
+        # not available.
+        # See https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#node-affinity
+        if self.preemptible:
+            yield client.V1PreferredSchedulingTerm(
+                preference=client.V1NodeSelectorTerm(
+                    match_expressions=[
+                        client.V1NodeSelectorRequirement(
+                            key=PREEMPTIBLE_NODE_LABEL,
+                            operator='Exists'
+                        )
+                    ]
+                ),
+                weight=100
+            )
+
+    @property
+    def pod_affinity(self):
+        return client.V1Affinity(
+            node_affinity=client.V1NodeAffinity(
+                preferred_during_scheduling_ignored_during_execution=list(
+                    self.pod_scheduling_preferences),
+                required_during_scheduling_ignored_during_execution=
+                client.V1NodeSelector(
+                    node_selector_terms=[
+                        client.V1NodeSelectorTerm(
+                            match_expressions=list(self.pod_node_selectors))
+                    ]
+                )
+            )
+        )
 
     @property
     def pod_tolerations(self):
-        # Toleration for GCE preemptible instances
-        yield client.V1Toleration(
-            effect='NoSchedule',
-            key='gke-preemptible',
-            operator='Equal',
-            value=str(self.preemptible).lower()
-        )
-
         # User-specified tolerations
         user_specified = self.options.tolerations or []
         for toleration in user_specified:
@@ -837,7 +889,7 @@ class WrappedTask(object):
             restart_policy='Never',
             containers=[self.container],
             volumes=list(self.pod_volumes),
-            node_selector=self.pod_node_selectors,
+            affinity=self.pod_affinity,
             tolerations=list(self.pod_tolerations),
             dns_policy=self.options.dns_policy,
             host_network=self.options.host_network
@@ -852,21 +904,6 @@ class WrappedTask(object):
             spec=self.pod_spec
         )
 
-    def status(self, api_client=None):
-        # Try to retrieve the pod name associated with this task. If it has
-        # not been set, then we cannot proceed.
-        if self.pod_name is None:
-            return
-
-        # Read status if pod associated with this task
-        api = client.CoreV1Api(api_client=api_client)
-        pod = _k8s_api_wrapper(404, logger=self.logger)(
-            api.read_namespaced_pod_status)(
-                name=self.pod_name,
-                namespace=self.options.namespace)
-        if pod is not None:
-            return pod.status
-
     def submit(self, api_client=None):
         # Validate DRM options
         self.compile_options(validate=True)
@@ -879,19 +916,23 @@ class WrappedTask(object):
         # Determine if this task should be scheduled on a non-preemptible
         # node. If a task was previously scheduled and is being resubmitted,
         # we assume that it was probably lost by the DRM and needs to be
-        # requeued. If it has been more than PREEMPTIBLE_TOLERATION_SECONDS
-        # since it was last scheduled, then force it to be scheduled on a
-        # non-preemptible node to maximize possibility of completion.
+        # requeued. If it has been more than PREEMPTIBLE_START_GRACE_PERIOD
+        # since it was last scheduled, then we set the
+        # OUT_OF_START_GRACE_PERIOD condition that forces it to be scheduled
+        # on a non-preemptible node to maximize possibility of completion. This
+        # condition is a temporary one, and is reset when the task completes or
+        # times out.
         # Note: scheduled_time state variable is set when creating a pod
         # object on the cluster and unset when the pod runs to completion
         # or times out.
         elif (
-                self.preemptible and (
+                self.options.preemptible and (
                     (now - self.scheduled_time).total_seconds() >
-                    PREEMPTIBLE_TOLERATION_SECONDS
+                    PREEMPTIBLE_START_GRACE_PERIOD.total_seconds()
                 )
         ):
-            self.force_non_preemptible = True
+            self.non_preemptible_conds.add(
+                NonPreemptibleCondition.OUT_OF_START_GRACE_PERIOD)
 
         # (Re)set pod name
         self.init_pod_name()
@@ -908,13 +949,34 @@ class WrappedTask(object):
         )
         self._raw.status = TaskStatus.submitted
 
+    def heartbeat(self, cnt_status):
+        # If a preemptible job is determined to be long running based on its
+        # last known runtime, we set the LONG_RUNNING_JOB condition such that
+        # the next time the pod needs to be requeued, it will be scheduled on
+        # a non-preemptible node. This is a permanent condition and does not
+        # reset when the pod completes. As such, if it fails and needs to be
+        # retried, the DRM already knows that this pod will take a long time
+        # to run, and proactively schedules it on a non-preemptible node.
+        if (
+                self.options.preemptible and
+                NonPreemptibleCondition.LONG_RUNNING_JOB not in
+                self.non_preemptible_conds and
+                cnt_status is not None and
+                cnt_status.wall_time is not None and
+                cnt_status.wall_time >
+                LONG_RUNNING_JOB_THRESHOLD.total_seconds()
+        ):
+            self.non_preemptible_conds.add(
+                NonPreemptibleCondition.LONG_RUNNING_JOB)
+
     def complete(self):
         # Unset the time any associated resources were scheduled if the task
         # ran to completion.
         self.scheduled_time = None
 
-        # Reset flag to force tasks on non-preemptible nodes
-        self.force_non_preemptible = False
+        # Reset temporary non-preemptible condition
+        for cond in TEMPORARY_NON_PREEMPTIBLE_CONDS:
+            self.non_preemptible_conds.discard(cond)
 
     def populate_logs(self, output, api_client=None):
         # Check if we actually need to collect logs for this task
@@ -943,8 +1005,8 @@ class WrappedTask(object):
                 namespace=self.options.namespace,
                 _preload_content=False,
                 _request_timeout=(
-                    LOGS_CONNECTION_TIMEOUT,
-                    LOGS_READ_TIMEOUT
+                    LOGS_CONNECTION_TIMEOUT.total_seconds(),
+                    LOGS_READ_TIMEOUT.total_seconds()
                 )
             )
 
@@ -985,6 +1047,11 @@ class WrappedTask(object):
         for v in self.attached_volumes.values():
             v.teardown(api_client=api_client)
         self.attached_volumes.clear()
+
+
+class ContainerStatus(NamedTuple):
+    exit_status: Optional[int] = None
+    wall_time: Optional[int] = None
 
 
 class DRM_Gke(DRM):
@@ -1079,7 +1146,7 @@ class DRM_Gke(DRM):
                 yield t, pods.get(t.pod_name)
 
     @staticmethod
-    def _parse_attrs_from_cnt_status(wrapped_task, pod_status):
+    def _parse_cnt_status(wrapped_task, pod_status):
         # Container status not updated yet. Skip for now...
         if pod_status.container_statuses is None:
             return
@@ -1090,21 +1157,20 @@ class DRM_Gke(DRM):
         done = cnt_state.terminated
         if done is not None and done.finished_at is not None:
             wall_time = (done.finished_at - done.started_at).total_seconds()
-            return {'exit_status': done.exit_code, 'wall_time': wall_time}
+            return ContainerStatus(
+                exit_status=done.exit_code,
+                wall_time=wall_time
+            )
 
-        # Parse running container status and identify timed out tasks
+        # Parse running container status
         running = cnt_state.running
-        if (
-                wrapped_task.options.timeout is not None and
-                running is not None and
-                running.started_at is not None and
-                # Kubernetes API returns timestamps in UTC time
-                (
-                    datetime.utcnow() -
-                    running.started_at.replace(tzinfo=None)
-                ).total_seconds() > wrapped_task.options.timeout
-        ):
-            return {'exit_status': TIMED_OUT_EXIT_STATUS}
+        if running is not None and running.started_at is not None:
+            # Container does not have an exit code, just report how long
+            # it has been running for
+            wall_time = (
+                datetime.utcnow() - running.started_at.replace(tzinfo=None)
+            ).total_seconds()
+            return ContainerStatus(wall_time=wall_time)
 
     def _fetch_completed_tasks(self, *tasks):
         for wrapped_task, pod_status in self._fetch_pod_statuses(*tasks):
@@ -1121,14 +1187,33 @@ class DRM_Gke(DRM):
                 continue
 
             # Parse completion status from pod container status
-            task_attrs = self._parse_attrs_from_cnt_status(
-                wrapped_task,
-                pod_status
-            )
-            # Pod ran to completion or timed out
-            if task_attrs is not None:
+            cnt_status = self._parse_cnt_status(wrapped_task, pod_status)
+
+            # Run hooks associated with task heartbeat
+            wrapped_task.heartbeat(cnt_status)
+
+            # Container not yet running
+            if cnt_status is None:
+                continue
+            # Pod ran to completion
+            elif cnt_status.exit_status is not None:
                 wrapped_task.complete()
-                yield wrapped_task, task_attrs
+                yield wrapped_task, cnt_status._asdict()
+            # Pod timed out
+            elif (
+                    wrapped_task.options.timeout is not None and
+                    cnt_status.wall_time is not None and
+                    cnt_status.wall_time > wrapped_task.options.timeout
+            ):
+                wrapped_task.logger.warning(
+                    f"Pod '{wrapped_task.pod_name}' associated with "
+                    f"{wrapped_task} has exceeded deadline of "
+                    f"{wrapped_task.options.timeout} second(s). Timing out..."
+                )
+                wrapped_task.complete()
+                # Cosmos expects a specific exit code to mark the job as
+                # timed out
+                yield wrapped_task, {'exit_status': TIMED_OUT_EXIT_STATUS}
             # Pod failed for some other k8s or infrastructure-specific
             # reason
             elif pod_status.phase == 'Failed':
@@ -1138,21 +1223,7 @@ class DRM_Gke(DRM):
                     f"{pod_status.message}"
                 )
                 yield wrapped_task, {'exit_status': None}
-            # Pod stuck in pending for too long
-            # Will be scheduled on non-preemptible in next loop
-            elif (
-                    pod_status.phase == 'Pending' and
-                    wrapped_task.preemptible and
-                    (
-                        datetime.now() - wrapped_task.raw.submitted_on
-                    ).total_seconds() > PENDING_TOLERATION_SECONDS
-            ):
-                wrapped_task.logger.warning(
-                    f"Pod '{wrapped_task.pod_name}' associated with "
-                    f"{wrapped_task} has been pending for too long"
-                )
-                wrapped_task.force_non_preemptible = True
-                yield wrapped_task, {'exit_status': None}
+
 
     def submit_job(self, task):
         WrappedTask(task).submit(api_client=self.api_client)
