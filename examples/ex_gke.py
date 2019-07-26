@@ -34,6 +34,7 @@ if __name__ == '__main__':
     cosmos = Cosmos(
         'sqlite:///sqlite.db',
         default_drm='gke',
+        default_max_attempts=3,
         default_drm_options={
             'image': 'frolvlad/alpine-bash:latest',
             'environment': {
@@ -52,10 +53,9 @@ if __name__ == '__main__':
                 ConfigMapVolume('balrog', '/var/google/config')
             ],
             'preemptible': True,
-            'partition': 'alignment',
+            'partition': 'test',
             'tolerations': [
-                PodToleration('foo'),
-                PodToleration('bar', 'baz', PodTolerationEffect.NO_EXECUTE)
+                PodToleration('test', 'true', PodTolerationEffect.NO_SCHEDULE)
             ]
         }
     )
