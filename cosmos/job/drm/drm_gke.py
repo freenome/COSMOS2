@@ -1192,16 +1192,14 @@ class DRM_Gke(DRM):
             # Run hooks associated with task heartbeat
             wrapped_task.heartbeat(cnt_status)
 
-            # Container not yet running
-            if cnt_status is None:
-                continue
             # Pod ran to completion
-            elif cnt_status.exit_status is not None:
+            if cnt_status and cnt_status.exit_status is not None:
                 wrapped_task.complete()
                 yield wrapped_task, cnt_status._asdict()
             # Pod timed out
             elif (
                     wrapped_task.options.timeout is not None and
+                    cnt_status and
                     cnt_status.wall_time is not None and
                     cnt_status.wall_time > wrapped_task.options.timeout
             ):
