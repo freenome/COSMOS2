@@ -21,14 +21,13 @@ class DRM_K8S_Jobs(DRM):  # noqa
     required_drm_options = {'image'}
     optional_drm_options = {'file', 'time', 'name', 'container_name', 'cpu', 'memory', 'disk',
                             'cpu-limit', 'memory-limit', 'disk-limit', 'time', 'persistent-disk-name',
-                            'volume-name', 'mount-path', 'preemptible', 'labels', 'retry-limit', 'partition'}
+                            'volume-name', 'mount-path', 'preemptible', 'labels', 'partition'}
 
     drm_options_to_task_properties = {
         'memory': Task.mem_req,
         'cpu': Task.cpu_req,
         'time': Task.time_req,
-        'partition': Task.queue,
-        'retry-limit': lambda task: task.max_attempts - 1,
+        'partition': Task.queue
     }
 
     def _merge_task_properties_and_drm_options(self, task, drm_options):
@@ -72,6 +71,11 @@ class DRM_K8S_Jobs(DRM):  # noqa
                 kbatch_option_value=self._get_drm_option_value(drm_options[kbatch_option_name]),
             ) for kbatch_option_name in drm_option_names if kbatch_option_name in drm_options
         ]
+
+        # No retries by the job controller. We have to set this explicitly
+        # since job controllers default to retrying 6 times.
+        kbatch_options.append('--retry-limit 0')
+
         kbatch_option_str = ' '.join(kbatch_options)
 
         kbatch_cmd = 'kbatch --script {script} {kbatch_option_str} {native_spec}'.format(
@@ -83,10 +87,21 @@ class DRM_K8S_Jobs(DRM):  # noqa
         kbatch_proc = sp.Popen(kbatch_cmd, shell=True, stdout=sp.PIPE, stderr=sp.PIPE)
         job_id, err = kbatch_proc.communicate()
 
-        if err:
-            raise RuntimeError(err)
+        # Only raise an error if `kbatch` fails. Warnings might be written to
+        # stderr that should not cause this to fail.
+        if kbatch_proc.returncode != 0:
+            raise RuntimeError(
+                f'exit code: {kbatch_proc.returncode}; message: {err}')
 
-        job_id = job_id.decode('utf-8').replace('\n', '')
+        # Update parsing of job ID from output of `kbatch` to be compatible
+        # with old and new version of kubectl
+        job_id = (
+            job_id
+            .decode('utf-8')
+            .strip()
+            .replace('job.batch/', '')
+            .replace(' created', '')
+        )
 
         task.drm_jobID = job_id
         task.status = TaskStatus.submitted
