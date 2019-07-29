@@ -52,6 +52,7 @@ LOGS_READ_TIMEOUT = timedelta(seconds=1)
 PREEMPTIBLE_NODE_LABEL = 'cloud.google.com/gke-preemptible'
 PREEMPTIBLE_START_GRACE_PERIOD = timedelta(hours=2)
 LONG_RUNNING_JOB_THRESHOLD = timedelta(hours=4)
+CONTAINER_READY_GRACE_PERIOD = timedelta(minutes=20)
 NODE_PARTITION_LABEL_KEY = 'partition'
 
 
@@ -154,7 +155,7 @@ class GkeDRMOptions(NamedTuple):
     memory_limit: Optional[str] = None
     # TODO (jeev): Add support for disk requirements for tasks
     # disk: Optional[str] = None
-    timeout: Optional[int] = None
+    timeout: Optional[timedelta] = None
     environment: Optional[Dict[str, Union[str, ENVVAR_TYPE]]] = None
     volumes: Optional[List[VOL_TYPE]] = None
     partition: Optional[str] = None
@@ -910,7 +911,7 @@ class WrappedTask(object):
 
         # Set the time that the pod was scheduled on the cluster,
         # if necessary
-        now = datetime.now()
+        now = datetime.utcnow()
         if self.scheduled_time is None:
             self.scheduled_time = now
         # Determine if this task should be scheduled on a non-preemptible
@@ -927,8 +928,8 @@ class WrappedTask(object):
         # or times out.
         elif (
                 self.options.preemptible and (
-                    (now - self.scheduled_time).total_seconds() >
-                    PREEMPTIBLE_START_GRACE_PERIOD.total_seconds()
+                    (now - self.scheduled_time) >
+                    PREEMPTIBLE_START_GRACE_PERIOD
                 )
         ):
             self.non_preemptible_conds.add(
@@ -961,10 +962,9 @@ class WrappedTask(object):
                 self.options.preemptible and
                 NonPreemptibleCondition.LONG_RUNNING_JOB not in
                 self.non_preemptible_conds and
-                cnt_status is not None and
                 cnt_status.wall_time is not None and
                 cnt_status.wall_time >
-                LONG_RUNNING_JOB_THRESHOLD.total_seconds()
+                LONG_RUNNING_JOB_THRESHOLD
         ):
             self.non_preemptible_conds.add(
                 NonPreemptibleCondition.LONG_RUNNING_JOB)
@@ -1051,7 +1051,14 @@ class WrappedTask(object):
 
 class ContainerStatus(NamedTuple):
     exit_status: Optional[int] = None
-    wall_time: Optional[int] = None
+    wall_time: Optional[timedelta] = None
+
+
+class ContainerReadyCondition(NamedTuple):
+    # Flag indicating if container is ready
+    status: bool
+    # Time spent in current state
+    duration: timedelta
 
 
 class DRM_Gke(DRM):
@@ -1077,10 +1084,10 @@ class DRM_Gke(DRM):
             else None
         ),
         'cpu': Task.core_req,
-        # Translate time requirements from minutes in Cosmos to seconds in
-        # pod spec
+        # Translate time requirements from minutes in Cosmos to a timedelta
+        # object
         'timeout': lambda task: (
-            task.time_req * 60
+            timedelta(minutes=task.time_req)
             if task.time_req is not None
             else None
         ),
@@ -1146,7 +1153,33 @@ class DRM_Gke(DRM):
                 yield t, pods.get(t.pod_name)
 
     @staticmethod
-    def _parse_cnt_status(wrapped_task, pod_status):
+    def _parse_cnt_ready_cond(pod_status):
+        # Container conditions not updated yet. Skip for now...
+        if pod_status.conditions is None:
+            return
+
+        # Find the container ready condition
+        for condition in pod_status.conditions:
+            if not condition.type == 'ContainersReady':
+                continue
+
+            # Skip handling of Unknown status - wait for the cluster to resolve
+            # this.
+            if condition.status == 'Unknown':
+                return
+
+            # Parse the amount of time spent in current status
+            elapsed_since_last_transition = (
+                datetime.utcnow() -
+                condition.last_transition_time.replace(tzinfo=None)
+            )
+            return ContainerReadyCondition(
+                status=condition.status == 'True',
+                duration=elapsed_since_last_transition
+            )
+
+    @staticmethod
+    def _parse_cnt_status(pod_status):
         # Container status not updated yet. Skip for now...
         if pod_status.container_statuses is None:
             return
@@ -1156,7 +1189,7 @@ class DRM_Gke(DRM):
         # Parse container termination status
         done = cnt_state.terminated
         if done is not None and done.finished_at is not None:
-            wall_time = (done.finished_at - done.started_at).total_seconds()
+            wall_time = done.finished_at - done.started_at
             return ContainerStatus(
                 exit_status=done.exit_code,
                 wall_time=wall_time
@@ -1168,8 +1201,7 @@ class DRM_Gke(DRM):
             # Container does not have an exit code, just report how long
             # it has been running for
             wall_time = (
-                datetime.utcnow() - running.started_at.replace(tzinfo=None)
-            ).total_seconds()
+                datetime.utcnow() - running.started_at.replace(tzinfo=None))
             return ContainerStatus(wall_time=wall_time)
 
     def _fetch_completed_tasks(self, *tasks):
@@ -1186,16 +1218,24 @@ class DRM_Gke(DRM):
                 yield wrapped_task, {'exit_status': None}
                 continue
 
+            # Parse container ready condition
+            cnt_ready_cond = self._parse_cnt_ready_cond(pod_status)
+
             # Parse completion status from pod container status
-            cnt_status = self._parse_cnt_status(wrapped_task, pod_status)
+            cnt_status = self._parse_cnt_status(pod_status)
 
             # Run hooks associated with task heartbeat
-            wrapped_task.heartbeat(cnt_status)
+            if cnt_status is not None:
+                wrapped_task.heartbeat(cnt_status)
 
             # Pod ran to completion
             if cnt_status and cnt_status.exit_status is not None:
                 wrapped_task.complete()
-                yield wrapped_task, cnt_status._asdict()
+                yield wrapped_task, {
+                    'exit_status': cnt_status.exit_status,
+                    'wall_time': cnt_status.wall_time.total_seconds()
+                }
+
             # Pod timed out
             elif (
                     wrapped_task.options.timeout is not None and
@@ -1206,12 +1246,13 @@ class DRM_Gke(DRM):
                 wrapped_task.logger.warning(
                     f"Pod '{wrapped_task.pod_name}' associated with "
                     f"{wrapped_task} has exceeded deadline of "
-                    f"{wrapped_task.options.timeout} second(s). Timing out..."
+                    f"{wrapped_task.options.timeout}. Timing out..."
                 )
                 wrapped_task.complete()
                 # Cosmos expects a specific exit code to mark the job as
                 # timed out
                 yield wrapped_task, {'exit_status': TIMED_OUT_EXIT_STATUS}
+
             # Pod failed for some other k8s or infrastructure-specific
             # reason
             elif pod_status.phase == 'Failed':
@@ -1219,6 +1260,26 @@ class DRM_Gke(DRM):
                     f"Pod '{wrapped_task.pod_name}' associated with "
                     f"{wrapped_task} failed as {pod_status.reason}: "
                     f"{pod_status.message}"
+                )
+                yield wrapped_task, {'exit_status': None}
+
+            # Pod container stuck in not ready status for too long
+            # We are observing pods being stuck in ContainerCreating for
+            # many hours with the following error:
+            # RunPodSandbox from runtime service failed: rpc error: code = Unknown desc = failed to create a sandbox for pod...:operation timeout: context deadline exceeded
+            # Sometimes, this may resolve within 10 minutes, but other times
+            # remains stuck until pods are manually deleted. In the following,
+            # we give the pod container 20 minutes to start, or kill and
+            # requeue the job.
+            elif (
+                cnt_ready_cond and
+                not cnt_ready_cond.status and
+                cnt_ready_cond.duration > CONTAINER_READY_GRACE_PERIOD
+            ):
+                wrapped_task.logger.warning(
+                    f"Container in pod '{wrapped_task.pod_name}' associated "
+                    f"with {wrapped_task} not ready after "
+                    f"{cnt_ready_cond.duration}"
                 )
                 yield wrapped_task, {'exit_status': None}
 
