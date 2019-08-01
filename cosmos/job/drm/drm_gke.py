@@ -34,6 +34,8 @@ POD_ANNOTATIONS = {
 COSMOS_IDENTIFIER_LABEL = 'owned-by-cosmos'
 COSMOS_TASK_STAGE_LABEL = 'cosmos-task-stage'
 COSMOS_TASK_UID_LABEL = 'cosmos-task-uid'
+COSMOS_CONTROLLER_NAME_LABEL = 'cosmos-controller-name'
+COSMOS_CONTROLLER_UID_LABEL = 'cosmos-controller-uid'
 POD_JOB_ID_LABEL = 'cosmos-job-id'
 VOLUME_NAME_PREFIX = 'cosmos-vol'
 KUBERNETES_LABEL_RE = re.compile(
@@ -788,6 +790,14 @@ class WrappedTask(object):
     @property
     def pod_metadata(self):
         pod_labels = self.options.labels or {}
+
+        # Add cosmos parent/controller labels if they exist
+        this_pod_name = os.getenv(PARENT_WORKFLOW_POD_NAME_ENVVAR)
+        this_pod_uid = os.getenv(PARENT_WORKFLOW_POD_UID_ENVVAR)
+        if this_pod_name and this_pod_uid:
+            pod_labels[COSMOS_CONTROLLER_NAME_LABEL] = this_pod_name
+            pod_labels[COSMOS_CONTROLLER_UID_LABEL] = this_pod_uid
+
         # We set a label to indicate that the created pod is associated with a
         # cosmos task
         pod_labels[COSMOS_IDENTIFIER_LABEL] = 'true'
