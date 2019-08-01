@@ -1219,7 +1219,7 @@ class DRM_Gke(DRM):
             # Handle case where pod was lost due to node failure or similar
             # problems.
             if pod_status is None:
-                wrapped_task.logger.warning(
+                wrapped_task.logger.debug(
                     f"Could not find pod '{wrapped_task.pod_name}' associated "
                     f"with {wrapped_task}"
                 )

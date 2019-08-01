@@ -75,7 +75,7 @@ def task_status_changed(task):
     # If a task was lost by the DRM, simply mark it as not attempted and
     # requeue
     elif task.status == TaskStatus.lost:
-        task.log.warn('Requeuing %s' % task)
+        task.log.debug('Requeuing %s' % task)
         task.status = TaskStatus.no_attempt
 
     elif task.status == TaskStatus.failed:
