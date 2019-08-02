@@ -529,6 +529,55 @@ class GcePersistentDisk(GenericVolume):
         )
 
 
+class FlexVolume(GenericVolume):
+    def __init__(
+            self,
+            driver,
+            mount_path,
+            read_only=False,
+            fs_type='ext4',
+            options=None,
+            secret_name=None,
+    ):
+        super().__init__(mount_path, read_only)
+        # Name of driver to use for this volume
+        self._driver = driver
+        # File system type (e.g. ext4)
+        self._fs_type = fs_type
+        # Options to be passed as params to driver
+        self._options = options or {}
+        # Name of secret containing values to be passed to driver
+        self._secret_name = secret_name
+
+    @property
+    def _slots(self):
+        return super()._slots + (
+            self._driver,
+            self._fs_type,
+            # Extract values from Dict[str, str] into a tuple to make
+            # slots hashable
+            tuple(sorted(self._options.items())),
+            self._secret_name
+        )
+
+    @property
+    def volume(self):
+        return client.V1Volume(
+            name=self._name,
+            flex_volume=client.V1FlexVolumeSource(
+                driver=self._driver,
+                fs_type=self._fs_type,
+                options=self._options,
+                read_only=self._read_only,
+                secret_ref=(
+                    client.V1LocalObjectReference(name=self._secret_name)
+                    if self._secret_name
+                    else None
+                )
+            )
+        )
+
+
 class WrappedTaskStateVariable(object):
     def __init__(self, name, default=None):
         super().__init__()
