@@ -165,7 +165,8 @@ class GkeDRMOptions(NamedTuple):
     node_selectors: Optional[Dict[str, str]] = None
     tolerations: Optional[List['PodToleration']] = None
     dns_policy: str = 'Default'
-    host_network: bool = True
+    host_network: bool = False
+    service_account: Optional[str] = None
     collect_logs: bool = True
 
 
@@ -952,7 +953,8 @@ class WrappedTask(object):
             affinity=self.pod_affinity,
             tolerations=list(self.pod_tolerations),
             dns_policy=self.options.dns_policy,
-            host_network=self.options.host_network
+            host_network=self.options.host_network,
+            service_account_name=self.options.service_account
         )
 
     @property
