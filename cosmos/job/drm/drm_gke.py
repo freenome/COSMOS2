@@ -108,7 +108,7 @@ def _k8s_api_wrapper(*codes_to_ignore, logger=None):
                     e.status > 500 or
                     # Retry on response truncation. This happens sometimes
                     # when fetching logs.
-                    (e.status == 500 and e.body and b'EOF' in e.body)
+                    (e.status == 500 and e.body and 'EOF' in str(e.body))
                 )) or
                 isinstance(e, TimeoutError)
             )
