@@ -39,7 +39,7 @@ COSMOS_CONTROLLER_UID_LABEL = 'cosmos-controller-uid'
 POD_JOB_ID_LABEL = 'cosmos-job-id'
 VOLUME_NAME_PREFIX = 'cosmos-vol'
 KUBERNETES_LABEL_RE = re.compile(
-    r'^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$')
+    r'^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?')
 KUBERNETES_INVALID_LABEL = 'INVALID'
 KUBERNETES_MAX_NAME_LENGTH = 63
 KUBERNETES_POD_CHECK_ENVVAR = 'KUBERNETES_SERVICE_HOST'
@@ -73,30 +73,28 @@ def _generate_name(prefix, suffix_length=6):
 
 
 def _kube_label(string, raise_exception=False):
-    # Match the pattern
-    match = KUBERNETES_LABEL_RE.match(string)
-    if match is None:
-        if raise_exception:
-            raise ValueError(
-                f"Invalid value: '{string}': a valid label must be an "
-                "empty string or consist of alphanumeric characters, "
-                "'-', '_' or '.', and must start and end with an alphanumeric "
-                "character (e.g. 'MyValue', or 'my_value', or '12345', "
-                f"regex used for validation is '{KUBERNETES_LABEL_RE.pattern}'"
-            )
-        return KUBERNETES_INVALID_LABEL
-
-    # Extract value from match
-    value = match.group()
-
     # Check length of string
-    if len(value) > KUBERNETES_MAX_NAME_LENGTH and raise_exception:
+    if len(string) > KUBERNETES_MAX_NAME_LENGTH and raise_exception:
         raise ValueError(
             f"Invalid value: '{string}': a valid label "
             f"must be no more than {KUBERNETES_MAX_NAME_LENGTH} characters"
         )
 
-    return value[:KUBERNETES_MAX_NAME_LENGTH].rstrip('._-')
+    value = string[:KUBERNETES_MAX_NAME_LENGTH]
+
+    # Match the pattern
+    match = KUBERNETES_LABEL_RE.match(value)
+    if (match is None or match.endpos != len(value)) and raise_exception:
+        raise ValueError(
+            f"Invalid value: '{value}': a valid label must be an "
+            "empty string or consist of alphanumeric characters, "
+            "'-', '_' or '.', and must start and end with an alphanumeric "
+            "character (e.g. 'MyValue', or 'my_value', or '12345', "
+            f"regex used for validation is '{KUBERNETES_LABEL_RE.pattern}'"
+        )
+
+    # Extract value from match
+    return match.group() if match is not None else KUBERNETES_INVALID_LABEL
 
 
 def _k8s_api_wrapper(*codes_to_ignore, logger=None):
