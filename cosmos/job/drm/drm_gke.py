@@ -72,9 +72,9 @@ def _generate_name(prefix, suffix_length=6):
     return f'{prefix[:KUBERNETES_MAX_NAME_LENGTH - len(suffix)]}{suffix}'
 
 
-def _kube_label(string, raise_exception=False):
+def _kube_label(string, strict=False):
     # Check length of string
-    if len(string) > KUBERNETES_MAX_NAME_LENGTH and raise_exception:
+    if strict and len(string) > KUBERNETES_MAX_NAME_LENGTH:
         raise ValueError(
             f"Invalid value: '{string}': a valid label "
             f"must be no more than {KUBERNETES_MAX_NAME_LENGTH} characters"
@@ -84,7 +84,7 @@ def _kube_label(string, raise_exception=False):
 
     # Match the pattern
     match = KUBERNETES_LABEL_RE.match(value)
-    if (match is None or match.endpos != len(value)) and raise_exception:
+    if strict and (match is None or match.endpos != len(value)):
         raise ValueError(
             f"Invalid value: '{value}': a valid label must be an "
             "empty string or consist of alphanumeric characters, "
