@@ -106,7 +106,11 @@ def _k8s_api_wrapper(*codes_to_ignore, logger=None):
                     e.status > 500 or
                     # Retry on response truncation. This happens sometimes
                     # when fetching logs.
-                    (e.status == 500 and e.body and 'EOF' in str(e.body))
+                    (
+                        e.status == 500 and
+                        isinstance(e.body, bytes) and
+                        b'EOF' in e.body
+                    )
                 )) or
                 isinstance(e, TimeoutError)
             )
@@ -916,17 +920,22 @@ class WrappedTask(object):
 
     @property
     def pod_affinity(self):
+        # Compile pod scheduling requirements
+        node_selectors = list(self.pod_node_selectors)
+        pod_scheduling_requirements = (
+            client.V1NodeSelector(
+                node_selector_terms=[
+                    client.V1NodeSelectorTerm(match_expressions=node_selectors)
+                ]
+            ) if node_selectors else None
+        )
+
         return client.V1Affinity(
             node_affinity=client.V1NodeAffinity(
                 preferred_during_scheduling_ignored_during_execution=list(
                     self.pod_scheduling_preferences),
                 required_during_scheduling_ignored_during_execution=
-                client.V1NodeSelector(
-                    node_selector_terms=[
-                        client.V1NodeSelectorTerm(
-                            match_expressions=list(self.pod_node_selectors))
-                    ]
-                )
+                pod_scheduling_requirements
             )
         )
 
