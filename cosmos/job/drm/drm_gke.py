@@ -96,7 +96,7 @@ def _kube_label(string, raise_exception=False):
             f"must be no more than {KUBERNETES_MAX_NAME_LENGTH} characters"
         )
 
-    return value[:KUBERNETES_MAX_NAME_LENGTH]
+    return value[:KUBERNETES_MAX_NAME_LENGTH].rstrip('._-')
 
 
 def _k8s_api_wrapper(*codes_to_ignore, logger=None):
