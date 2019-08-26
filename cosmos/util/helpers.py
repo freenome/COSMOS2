@@ -5,11 +5,13 @@ import signal
 import os
 import random
 import string
-
 import time
+import multiprocessing
+
 
 def random_str(n):
     return ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(n))
+
 
 def make_dict(*list_of_dicts, **additional_kwargs):
     """
@@ -94,15 +96,15 @@ def confirm(prompt=None, default=False, timeout=0):
             if not ans:
                 return default
             if ans not in ['y', 'Y', 'yes', 'n', 'no', 'N']:
-                print 'please enter y or n.'
+                print('please enter y or n.')
                 continue
             if ans in ['y', 'yes', 'Yes']:
                 return True
             if ans in ['n', 'no', 'N']:
                 return False
         except TimeOutException:
-            print "Confirmation timed out_dir after {0}s, returning default of '{1}'".format(timeout,
-                                                                                             'yes' if default else 'no')
+            print("Confirmation timed out_dir after {0}s, returning default of '{1}'".format(timeout,
+                                                                                             'yes' if default else 'no'))
             return default
 
 
@@ -160,7 +162,7 @@ def formatError(txt, dict, error_text=''):
         dash='-' * 76,
         dic=pprint.pformat(dict, indent=4),
         error_text=error_text + "\n")
-    print s
+    print(s)
 
 
 def get_logger(name, path=None):
@@ -218,3 +220,28 @@ def derive_exit_code_from_workflow(workflow):
     workflow.log.warning("%s unable to pinpoint cause of failure, returning %d",
                          workflow, os.EX_SOFTWARE)
     return os.EX_SOFTWARE
+
+
+def cpu_count():
+    # Attempt to retrieve CPU quota from control groups for Linux-based systems
+    # This works from within Docker containers and uses the CPU limits
+    # specified for the workload.
+    if os.uname() == 'Linux':
+        def _int_from_file(path):
+            with open(path) as handle:
+                return int(handle.read().strip())
+
+        try:
+            quota = _int_from_file('/sys/fs/cgroup/cpu/cpu.cfs_quota_us')
+            # A quota of -1 indicates, as one would expect, that one does
+            # not exist. The process can use all the cores available on the
+            # system.
+            if quota != -1:
+                period = _int_from_file('/sys/fs/cgroup/cpu/cpu.cfs_period_us')
+                return quota / period
+        # File not found or could not parse integer from file contents
+        except (IOError, ValueError):
+            pass
+
+    # Fall back to reporting default CPU count for system
+    return multiprocessing.cpu_count()

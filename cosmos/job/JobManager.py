@@ -21,6 +21,9 @@ class JobManager(object):
         """This allows support for drmaa:ge type syntax"""
         return self.drms[drm_name.split(':')[0]]
 
+    def get_max_cores_for_drm(self, drm_name):
+        return self.get_drm(drm_name).max_cores
+
     def call_cmd_fxn(self, task):
         """
         NOTE THIS METHOD MUST BE THREAD SAFE

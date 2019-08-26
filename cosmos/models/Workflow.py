@@ -74,7 +74,6 @@ class Workflow(Base):
     created_on = Column(DateTime)
     started_on = Column(DateTime)
     finished_on = Column(DateTime)
-    max_cores = Column(Integer)
     primary_log_path = Column(String(255))
     _log = None
 
@@ -123,6 +122,7 @@ class Workflow(Base):
         if not self.created_on:
             self.created_on = datetime.datetime.now()
         self.dont_garbage_collect = []
+        self.max_cores = None
 
     @property
     def log(self):
@@ -314,7 +314,7 @@ class Workflow(Base):
         """
         Runs this Workflow's DAG
 
-        :param int max_cores: The maximum number of cores to use at once.  A value of None indicates no maximum.
+        :param Union[Dict[str, float], float] max_cores: Maximum number of cores to use at once.  May be a dict of DRMs to their respective core limits or a float indicating a core limit for the default DRM. A value of None indicates no user-specified core limits. Default DRM-specific core limits may still be enforced.
         :param int max_attempts: The maximum number of times to retry a failed job.
              Can be overridden with on a per-Task basis with Workflow.add_task(..., max_attempts=N, ...)
         :param callable log_out_dir_func: A function that returns a Task's logging directory (must be unique).
@@ -348,14 +348,37 @@ class Workflow(Base):
             self.log.info('Running as %s@%s, pid %s',
                           user, os.uname()[1], os.getpid())
 
-            self.max_cores = max_cores
-
             from ..job.JobManager import JobManager
 
             if self.jobmanager is None:
                 self.jobmanager = JobManager(get_submit_args=self.cosmos_app.get_submit_args,
                                              cmd_wrapper=cmd_wrapper,
                                              log_out_dir_func=log_out_dir_func)
+
+            # Validate DRMs passed in max_cores
+            if isinstance(max_cores, dict):
+                invalid_drms_in_max_cores = {
+                    d for d in max_cores
+                    if d not in self.jobmanager.drms
+                }
+                if invalid_drms_in_max_cores:
+                    raise ValueError(
+                        f"Unknown DRM(s) specified in max_cores argument to "
+                        "Workflow.run method: "
+                        f"{', '.join(invalid_drms_in_max_cores)}"
+                    )
+                self.max_cores = max_cores
+            # If a single numeric value is passed, assume that this is the
+            # core limit for the default DRM.
+            elif isinstance(max_cores, (int, float)):
+                self.max_cores = {
+                    self.cosmos_app.default_drm: float(max_cores)}
+            elif max_cores is not None:
+                raise ValueError(
+                    "Expected an integer, float, or dict of core limits for "
+                    "the respective DRMs as the max_cores argument, but got "
+                    f"value of type {type(max_cores)}: {max_cores}"
+                )
 
             self.status = WorkflowStatus.running
             self.successful = False
@@ -395,11 +418,24 @@ class Workflow(Base):
 
             handle_exits(self)
 
+            # make sure we've got enough cores
             if self.max_cores is not None:
                 self.log.info('Ensuring there are enough cores...')
-                # make sure we've got enough cores
                 for t in task_queue:
-                    assert int(t.core_req) <= self.max_cores, '%s requires more cpus (%s) than `max_cores` (%s)' % (t, t.core_req, self.max_cores)
+                    req = int(t.core_req)
+                    # Determine the user-specified limit or the default limit
+                    # for the DRM, if they exist
+                    limit = self.max_cores.get(
+                        t.drm,
+                        self.jobmanager.get_max_cores_for_drm(t.drm)
+                    )
+                    # Only check if limit is not 0 or None. Both
+                    # of these imply infinite cores.
+                    if limit and req > limit:
+                        raise RuntimeError(
+                            f"Not enough cores for task: {t}. "
+                            f"Requires {req} cores but only got {limit}."
+                        )
 
             # Run this thing!
             self.log.info('Committing to SQL db...')
@@ -630,36 +666,62 @@ def _run(workflow, session, task_queue):
 
 
 def _run_queued_and_ready_tasks(task_queue, workflow):
-    max_cores = workflow.max_cores
-    ready_tasks = [task for task, degree in list(task_queue.in_degree()) if
-                   degree == 0 and task.status == TaskStatus.no_attempt]
+    # Collect tasks that are ready to run
+    ready_tasks = defaultdict(set)
+    for task, degree in task_queue.in_degree():
+        if degree == 0 and task.status == TaskStatus.no_attempt:
+            ready_tasks[task.drm].add(task)
 
-    if max_cores is None:
-        submittable_tasks = sorted(ready_tasks, key=lambda t: t.id)
-    else:
-        cores_used = sum([t.core_req for t in workflow.jobmanager.running_tasks])
-        cores_left = max_cores - cores_used
+    # No ready tasks. Nothing to do here!
+    if not ready_tasks:
+        return
 
-        submittable_tasks = []
-        ready_tasks = sorted(
-            ready_tasks,
-            key=lambda t: (t.core_req, t.id),
-            reverse=True
+    # Core limits for workflow
+    core_limits = workflow.max_cores or {}
+
+    # Number of cores used
+    cores_used = defaultdict(int)
+    for task in workflow.jobmanager.running_tasks:
+        cores_used[task.drm] += task.core_req
+
+    # Collect as many tasks to launch as possible while respecting core limits
+    submittable_tasks = set()
+    for drm, tasks in ready_tasks.items():
+        # Maximum allowed cores for this DRM. May be a user-specified limit or
+        # one defined by the DRM.
+        drm_core_limit = core_limits.get(
+            drm,
+            workflow.jobmanager.get_max_cores_for_drm(drm)
         )
-        while ready_tasks:
-            task = ready_tasks[-1]
-            there_are_cores_left = task.core_req <= cores_left
-            if there_are_cores_left:
-                cores_left -= task.core_req
-                submittable_tasks.append(task)
-                ready_tasks.pop()
-            else:
-                break
+        # No core limit (None or 0). All is well.
+        if not drm_core_limit:
+            submittable_tasks.update(tasks)
+        # If a core limit exists, figure out how many free cores we have
+        # and pack them with jobs!
+        else:
+            available_cores = drm_core_limit - cores_used.get(drm, 0)
+            # TODO (jeev): ideally we should sort by the number of downstream
+            # tasks that a given task can unblock (size of the subgraph of the
+            # given node in the DAG)
+            for task in sorted(
+                    tasks,
+                    key=lambda t: (t.core_req, t.id),
+                    reverse=True
+            ):
+                # TODO (jeev): Do we want to greedily pack more small tasks
+                # into the DRM?
+                if task.core_req > available_cores:
+                    workflow.log.info(
+                        f"Reached core limit of {drm_core_limit} for "
+                        f"DRM: {drm}. Waiting for a task to finish..."
+                    )
+                    break
+
+                submittable_tasks.add(task)
+                available_cores -= task.core_req
 
     # submit in a batch for speed
     workflow.jobmanager.run_tasks(submittable_tasks)
-    if len(submittable_tasks) < len(ready_tasks):
-        workflow.log.info('Reached max_cores limit of %s, waiting for a task to finish...' % max_cores)
 
     # only commit submitted Tasks after submitting a batch
     workflow.session.commit()

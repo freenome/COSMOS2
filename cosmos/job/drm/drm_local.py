@@ -7,9 +7,11 @@ else:
     import subprocess as sp
 import time
 
+from cached_property import cached_property
 from cosmos.job.drm.DRM_Base import DRM
 from cosmos.job.drm.util import exit_process_group
 from cosmos.api import TaskStatus
+from cosmos.util.helpers import cpu_count
 
 
 class DRM_Local(DRM):
@@ -110,6 +112,11 @@ class DRM_Local(DRM):
 
     def kill(self, task):
         return self.kill_tasks([task])
+
+    @cached_property
+    def max_cores(self):
+        value = super().max_cores
+        return value if value is not None else cpu_count()
 
 
 class JobStatusError(Exception):

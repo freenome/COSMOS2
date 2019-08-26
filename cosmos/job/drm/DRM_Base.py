@@ -1,4 +1,8 @@
+import inflection
+import os
+
 from abc import abstractmethod, ABCMeta
+from cached_property import cached_property
 
 
 class DRM(object):
@@ -7,7 +11,6 @@ class DRM(object):
 
     __metaclass__ = ABCMeta
 
-    name = None
     poll_interval = 1
     required_drm_options = set()
 
@@ -46,6 +49,11 @@ class DRM(object):
         """
         return {drm.name for drm in cls.__subclasses__()}
 
+    @property
+    @abstractmethod
+    def name(self):
+        raise NotImplementedError
+
     @abstractmethod
     def submit_job(self, task):
         raise NotImplementedError
@@ -71,3 +79,18 @@ class DRM(object):
 
     def populate_logs(self, task):
         pass
+
+    @cached_property
+    def max_cores(self):
+        env_var = (
+            f'COSMOS_{inflection.underscore(self.name).upper()}_MAX_CORES')
+        value = os.getenv(env_var)
+        if value is not None:
+            try:
+                return float(value)
+            except ValueError:
+                raise ValueError(
+                    f"Error determining maximum allowable cores for DRM: "
+                    f"{self.name}. Expected float for environment variable: "
+                    f"{env_var}. Got '{value}'."
+                )

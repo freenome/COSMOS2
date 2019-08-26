@@ -19,7 +19,7 @@ from cosmos.models.Cosmos import Cosmos, default_get_submit_args
 from cosmos.models.Stage import Stage
 from cosmos.models.Task import Task
 from cosmos.models.Workflow import Workflow, default_task_log_output_dir
-from cosmos.util.args import add_workflow_args
+from cosmos.util.args import max_cores, add_workflow_args
 from cosmos.util.helpers import make_dict
 from cosmos.util.iterstuff import only_one
 from cosmos.util.signal_handlers import SGESignalHandler, handle_sge_signals

@@ -35,6 +35,8 @@ install_requires = [
     "python-dateutil",
     "kubernetes",
     "tenacity",
+    "cached_property",
+    "inflection"
 ]
 package_data = {'cosmos': list(find_all('cosmos/', '.py|.pyc$', inverse=True, remove_prefix=True))}
 

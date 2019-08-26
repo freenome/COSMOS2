@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import random
 
 from cosmos.api import Cosmos
@@ -53,7 +55,7 @@ if __name__ == '__main__':
                 ConfigMapVolume('balrog', '/var/google/config')
             ],
             'preemptible': True,
-            'partition': 'test',
+            # 'partition': 'test',
             'tolerations': [
                 PodToleration('test', 'true', PodTolerationEffect.NO_SCHEDULE)
             ]
@@ -62,11 +64,20 @@ if __name__ == '__main__':
     cosmos.initdb()
     workflow = cosmos.start('Example1', restart=True, skip_confirm=True)
 
-    a = workflow.add_task(
+    for idx in range(50):
+        workflow.add_task(
+            func=say,
+            params=dict(text=f'Hello World from local worker {idx+1}'),
+            uid=f'local_say_task_{idx}',
+            core_req=1,
+            drm='local'
+        )
+
+    workflow.add_task(
         func=say,
-        params=dict(text='Hello World',),
-        uid='say_task',
-        core_req=0.1
+        params=dict(text='Hello World from gke',),
+        uid='gke_say_task',
+        core_req=1,
     )
 
     b_tasks = []
@@ -104,4 +115,4 @@ if __name__ == '__main__':
         max_attempts=3
     )
 
-    workflow.run()
+    workflow.run(max_cores={'local': 4})
