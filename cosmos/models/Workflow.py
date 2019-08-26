@@ -416,6 +416,10 @@ class Workflow(Base):
             self.log.info('Skipping %s successful tasks...' % len(successful))
             task_queue.remove_nodes_from(successful)
 
+            # Compute weights/priorities of nodes in task queue for
+            # preferential queuing
+            _compute_priorities(task_queue)
+
             handle_exits(self)
 
             # make sure we've got enough cores
@@ -700,16 +704,15 @@ def _run_queued_and_ready_tasks(task_queue, workflow):
         # and pack them with jobs!
         else:
             available_cores = drm_core_limit - cores_used.get(drm, 0)
-            # TODO (jeev): ideally we should sort by the number of downstream
-            # tasks that a given task can unblock (size of the subgraph of the
-            # given node in the DAG)
             for task in sorted(
                     tasks,
-                    key=lambda t: (t.core_req, t.id),
+                    key=lambda t: (
+                        task_queue.nodes[t]['priority'],
+                        t.core_req,
+                        t.id
+                    ),
                     reverse=True
             ):
-                # TODO (jeev): Do we want to greedily pack more small tasks
-                # into the DRM?
                 if task.core_req > available_cores:
                     workflow.log.info(
                         f"Reached core limit of {drm_core_limit} for "
@@ -780,3 +783,32 @@ def _copy_graph(graph):
     graph2.add_edges_from(graph.edges())
     graph2.add_nodes_from(graph.nodes())
     return graph2
+
+
+def _compute_priorities(graph: nx.DiGraph):
+    """
+    Compute the priority of each node in the graph.
+
+    :param nx.DiGraph graph: The networkx directed graph to compute priorities for.
+    """
+
+    # Compute the size of the subgraph under each node. This then becomes the
+    # weight/priority of that node. For instance, in the following DAG:
+    #       A
+    #      / \
+    #     B   C
+    #    /   / \
+    #   D   E   F
+    #        \ /
+    #         G
+    # the priority of G is 1, since its subgraph only contains 1 node (G).
+    # Accordingly, B has a priority of 2, C has a priority of 4, and A has a
+    # priority of 7. We do this by iterating along a topologically sorted
+    # representation of the graph from leaves -> roots (i.e. G -> A) and
+    # summing the weights of the downstream nodes. We add 1 to this
+    # sum for the current node.
+    for node in reversed(list(topological_sort(graph))):
+        graph.nodes[node]['priority'] = sum(
+            graph.nodes[n]['priority']
+            for n in graph[node]
+        ) + 1
