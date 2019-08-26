@@ -226,7 +226,7 @@ def cpu_count():
     # Attempt to retrieve CPU quota from control groups for Linux-based systems
     # This works from within Docker containers and uses the CPU limits
     # specified for the workload.
-    if os.uname() == 'Linux':
+    if os.uname().sysname == 'Linux':
         def _int_from_file(path):
             with open(path) as handle:
                 return int(handle.read().strip())
