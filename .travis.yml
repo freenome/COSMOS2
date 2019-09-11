@@ -1,8 +1,15 @@
 dist: bionic
 language: python
 python:
-  - "3.6"
-  - "3.7"
+- '3.6'
+- '3.7'
 sudo: false
 install: pip install .
 script: py.test
+deploy:
+  provider: packagecloud
+  repository: python
+  username: freenome
+  dist: ubuntu/bionic
+  token:
+    secure: ZHb4jtCvfyVUWLJgJ+Qp4mz94M7GiXp2mREUdapiYCl32Xrbi6HMOQ5/pwTfnmN7SGJnvVt9cWMgt7MAZuQEpju4CX2v3/OFUNHcHAiWv0JidI80j7opFuetfY92WT1ifSMurujS6N96mo75Ujtkq5breD5tVmFHYWqhBPKlBh/qOji09m/sxFVJpThQ8OaJbx+gLG0EK46qw1jiqUcvScLX7hWCa63RxBDVcTN1fEGgbnNtFV0L+TEw0RdldJ2oL1Xg138B0YChOsyThMk2BJR3kZNNZlqKmCuCw6RwAZJxHsd6yonnLSUWJUtm0Oa1vEuhWxW+eRrhevNm1ALhoZGBys07haaf2uZrKMEyvImMwcUIOuvnQnKmRNVjMuSXXVcay9GMSQaOn+6kgWfGtKPrLswitrMZxJVV9ELezfLS+lmepi88YMbKW/PnD355YMliQKb5fg+pSyUUiGweuiMwisURyCSSTDRp24owVUYA1r6xUC2zWVwc9nVmZD+ly+tIkCnELRy0DbENAYzk15qz+qoj7WzgygCP+cM3aTMNENVMSHE/d81B2HOplAxHRWbf1UZwHaIjCNKr+jwjDP7Vc+B9uw0mcngaXPR/OTpmG8j1aW4YMyCBu77L2rqfjckqD1E1Hatzg0HqlLOib7iu85YLTjP802ySl04Qt1E=
