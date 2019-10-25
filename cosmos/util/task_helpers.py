@@ -7,7 +7,7 @@ import re
 
 
 def bucket_url_and_key(gs_path):
-    m = re.search('(gs://.+?)/.+$', gs_path)
+    m = re.search(r'(gs://.+?)/.+$', gs_path)
     if m:
         gs_bucket_path = m.group(1)
         key = gs_path.replace(gs_bucket_path + '/', '')
@@ -18,7 +18,7 @@ def bucket_url_and_key(gs_path):
 
 def bucket_and_key(gs_path):
     bucket_url, key = bucket_url_and_key(gs_path)
-    return re.sub('^gs://', '', bucket_url), key
+    return re.sub(r'^gs://', '', bucket_url), key
 
 
 def stage_to_scratch(*args, gsutil_cmd='gsutil', parallel_cmd='parallel', exclude=None):

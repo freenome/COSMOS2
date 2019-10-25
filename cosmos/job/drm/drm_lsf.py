@@ -93,8 +93,8 @@ def bjobs_all():
     except (sp.CalledProcessError, OSError):
         return {}
     bjobs = {}
-    header = re.split("\s\s+", lines[0])
+    header = re.split(r"\s\s+", lines[0])
     for l in lines[1:]:
-        items = re.split("\s\s+", l)
+        items = re.split(r"\s\s+", l)
         bjobs[items[0]] = dict(zip(header, items))
     return bjobs
