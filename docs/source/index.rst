@@ -9,7 +9,6 @@ we are planning a major publication before the official release.
     :maxdepth: 2
 
     1_introduction
-    2_install
     3_getting_started
     workflows/initializing
     workflows/task_func
