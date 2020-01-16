@@ -46,7 +46,7 @@ if sys.version_info < (3, 6):
     install_requires += ['enum34']
 
 setup(
-    name="cosmos-wfm",
+    name="freenome-cosmos-wfm",
     version=__version__,
     scripts=['bin/cosmos','bin/run_pyfunc'],
     description="Workflow Management System",
