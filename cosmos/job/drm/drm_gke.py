@@ -102,6 +102,7 @@ def _k8s_api_wrapper(*codes_to_ignore, logger=None):
         def _should_retry(e):
             # Retry on response truncation. This happens sometimes when fetching logs.
             is_response_truncated = (e.status == 500 and isinstance(e.body, bytes) and b'EOF' in e.body)
+
             # Retry on conflict with current cluster state. Workaround for:
             # HTTP response headers:
             # <CIMultiDictProxy('Audit-Id': '01fab989-6ce8-439a-bc55-b61145a0cf36', 'Content-Type': 'application/json',
@@ -112,6 +113,7 @@ def _k8s_api_wrapper(*codes_to_ignore, logger=None):
             # TODO (jeev): This is a bandaid fix. We need a more reliable
             #  solution.
             is_gke_quota_conflict = (e.status == 409)
+
             # Retry on all 50X errors
             is_50X_error = e.status > 500
             is_known_api_exception = (isinstance(e, ApiException) and
