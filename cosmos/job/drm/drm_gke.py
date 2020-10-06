@@ -110,7 +110,12 @@ def _k8s_api_wrapper(*codes_to_ignore, logger=None):
                         e.status == 500 and
                         isinstance(e.body, bytes) and
                         b'EOF' in e.body
-                    )
+                    ) or
+                    # Retry on conflict with current cluster state. Workaround for:
+                    # HTTP response headers: <CIMultiDictProxy('Audit-Id': '01fab989-6ce8-439a-bc55-b61145a0cf36', 'Content-Type': 'application/json', 'Date': 'Sat, 11 Jan 2020 17:09:22 GMT', 'Content-Length': '342')>HTTP response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"Operation cannot be fulfilled on resourcequotas \"gke-resource-quotas\": the object has been modified; please apply your changes to the latest version and try again","reason":"Conflict","details":{"name":"gke-resource-quotas","kind":"resourcequotas"},"code":409}
+                    # TODO (jeev): This is a bandaid fix. We need a more reliable
+                    #  solution.
+                    e.status == 409
                 )) or
                 isinstance(e, TimeoutError)
             )
