@@ -1,6 +1,8 @@
 import base64
 import copy
 import functools
+import json
+import logging
 import os
 import random
 import re
@@ -19,6 +21,7 @@ from kubernetes.client.rest import ApiException
 from sqlalchemy import inspect as sqlalchemy_inspect
 from tenacity import (
     retry,
+    before_sleep_log,
     stop_after_attempt,
     wait_exponential,
     retry_if_exception
@@ -100,33 +103,51 @@ def _kube_label(string, strict=False):
 def _k8s_api_wrapper(*codes_to_ignore, logger=None):
     def decorator(func):
         def _should_retry(e):
-            if isinstance(e, ApiException):
-                # Retry on response truncation. This happens sometimes when fetching logs.
-                is_response_truncated = (e.status == 500 and isinstance(e.body, bytes) and b'EOF' in e.body)
-
-                # Retry on conflict with current cluster state. Workaround for:
-                # HTTP response headers:
-                # <CIMultiDictProxy('Audit-Id': '01fab989-6ce8-439a-bc55-b61145a0cf36', 'Content-Type': 'application/json',
-                # 'Date': 'Sat, 11 Jan 2020 17:09:22 GMT', 'Content-Length': '342')>HTTP
-                # response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",
-                # "message":"Operation cannot be fulfilled on resourcequotas \"gke-resource-quotas\": the object has been modified;
-                # please apply your changes to the latest version and try again","reason":"Conflict","details":{"name":"gke-resource-quotas","kind":"resourcequotas"},"code":409}
-                # TODO (jeev): This is a bandaid fix. We need a more reliable
-                #  solution.
-                is_gke_quota_conflict = (e.status == 409)
-
-                # Retry on all 50X errors
-                is_50X_error = e.status > 500
-                is_known_api_exception = (is_50X_error or is_response_truncated or is_gke_quota_conflict)
-            else:
-                is_known_api_exception = False
-
-            retry_cond = (is_known_api_exception or isinstance(e, TimeoutError))
-            if retry_cond:
-                if logger is not None:
-                    logger.warning(f'Retrying API call due to error: {str(e)}')
+            if isinstance(e, TimeoutError):
                 return True
-            return False
+
+            if not isinstance(e, ApiException):
+                return False
+
+            # Retry on conflict with current cluster state. Workaround for:
+            # HTTP response headers:
+            # <CIMultiDictProxy('Audit-Id': '01fab989-6ce8-439a-bc55-b61145a0cf36', 'Content-Type': 'application/json',
+            # 'Date': 'Sat, 11 Jan 2020 17:09:22 GMT', 'Content-Length': '342')>HTTP
+            # response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",
+            # "message":"Operation cannot be fulfilled on resourcequotas \"gke-resource-quotas\": the object has been modified;
+            # please apply your changes to the latest version and try again","reason":"Conflict","details":{"name":"gke-resource-quotas","kind":"resourcequotas"},"code":409}
+            # TODO (jeev): This is a bandaid fix. We need a more reliable
+            #  solution.
+            if e.status == 409:
+                return True
+            # Too many requests
+            if e.status == 429:
+                return True
+
+            # Retry on response truncation. This happens sometimes when fetching logs.
+            if e.status == 500:
+                if isinstance(e.body, bytes) and b"EOF" in e.body:
+                    return True
+
+                try:
+                    body_dict = json.loads(e.body)
+                except json.decoder.JSONDecodeError:
+                    return False
+                # ServerTimeout
+                # kubernetes_asyncio.client.exceptions.ApiException: (500)
+                # Reason: Internal Server Error
+                # HTTP response headers: <CIMultiDictProxy('Audit-Id': '75a14aca-9617-4cb4-9eb8-4d70e2b5844a', 'Content-Type': 'application/json', 'Date': 'Sat, 02 May 2020 14:16:22 GMT', 'Content-Length': '242')>
+                # HTTP response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"The POST operation against Pod could not be completed at this time, please try again.","reason":"ServerTimeout","details":{"name":"POST","kind":"Pod"},"code":500}
+                if body_dict["reason"] == "ServerTimeout":
+                    return True
+
+                return False
+
+            # if logger is not None:
+            #     logger.warning(f'Retrying API call due to error: {str(e)}')
+
+            # Retry on all 50X errors
+            return e.status > 500
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -134,7 +155,8 @@ def _k8s_api_wrapper(*codes_to_ignore, logger=None):
                 retry_decorator = retry(
                     stop=stop_after_attempt(5),
                     wait=wait_exponential(multiplier=1, min=1, max=10),
-                    retry=retry_if_exception(_should_retry)
+                    retry=retry_if_exception(_should_retry),
+                    before_sleep=before_sleep_log(logger, logging.DEBUG)
                 )
                 result = retry_decorator(func)(*args, **kwargs)
             except ApiException as e:
