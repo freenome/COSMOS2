@@ -29,6 +29,8 @@ from tenacity import (
 from typing import Dict, List, NamedTuple, Optional, TypeVar, Union
 from urllib3.exceptions import MaxRetryError, TimeoutError
 
+logger = logging.getLogger(__name__)
+
 CONTAINER_NAME = 'main'
 DEFAULT_NAME_PREFIX = 'cosmos-job'
 POD_ANNOTATIONS = {
@@ -100,7 +102,7 @@ def _kube_label(string, strict=False):
     return match.group() if match is not None else KUBERNETES_INVALID_LABEL
 
 
-def _k8s_api_wrapper(*codes_to_ignore, logger=None):
+def _k8s_api_wrapper(*codes_to_ignore):
     def decorator(func):
         def _should_retry(e):
             if isinstance(e, TimeoutError):
@@ -143,9 +145,6 @@ def _k8s_api_wrapper(*codes_to_ignore, logger=None):
 
                 return False
 
-            # if logger is not None:
-            #     logger.warning(f'Retrying API call due to error: {str(e)}')
-
             # Retry on all 50X errors
             return e.status > 500
 
@@ -156,7 +155,7 @@ def _k8s_api_wrapper(*codes_to_ignore, logger=None):
                     stop=stop_after_attempt(5),
                     wait=wait_exponential(multiplier=1, min=1, max=10),
                     retry=retry_if_exception(_should_retry),
-                    before_sleep=before_sleep_log(logger, logging.DEBUG)
+                    before_sleep=before_sleep_log(logger, logging.WARNING)
                 )
                 result = retry_decorator(func)(*args, **kwargs)
             except ApiException as e:
@@ -514,7 +513,7 @@ class PersistentVolume(GenericVolume):
     def setup(self, api_client=None):
         if not self._active:
             api = client.CoreV1Api(api_client=api_client)
-            _k8s_api_wrapper(logger=self._parent.logger)(
+            _k8s_api_wrapper()(
                 api.create_namespaced_persistent_volume_claim)(
                     namespace=self._parent.options.namespace,
                     body=self._persistent_volume_claim)
@@ -523,7 +522,7 @@ class PersistentVolume(GenericVolume):
     def teardown(self, api_client=None):
         if self._active:
             api = client.CoreV1Api(api_client=api_client)
-            _k8s_api_wrapper(404, logger=self._parent.logger)(
+            _k8s_api_wrapper(404)(
                 api.delete_namespaced_persistent_volume_claim)(
                 name=self._name,
                 namespace=self._parent.options.namespace
@@ -1042,7 +1041,7 @@ class WrappedTask(object):
 
         # Finally submit the pod to the cluster
         api = client.CoreV1Api(api_client=api_client)
-        _k8s_api_wrapper(logger=self.logger)(api.create_namespaced_pod)(
+        _k8s_api_wrapper()(api.create_namespaced_pod)(
             namespace=self.options.namespace,
             body=self.pod
         )
@@ -1096,7 +1095,7 @@ class WrappedTask(object):
         os.makedirs(os.path.dirname(output), exist_ok=True)
 
         # Wrapper for collecting task logs
-        @_k8s_api_wrapper(logger=self.logger)
+        @_k8s_api_wrapper()
         def _inner():
             resp = api.read_namespaced_pod_log(
                 name=self.pod_name,
@@ -1136,7 +1135,7 @@ class WrappedTask(object):
 
         # Delete the pod associated with this task
         api = client.CoreV1Api(api_client=api_client)
-        _k8s_api_wrapper(404, logger=self.logger)(api.delete_namespaced_pod)(
+        _k8s_api_wrapper(404)(api.delete_namespaced_pod)(
             name=self.pod_name,
             namespace=self.options.namespace
         )
