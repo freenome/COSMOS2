@@ -100,25 +100,27 @@ def _kube_label(string, strict=False):
 def _k8s_api_wrapper(*codes_to_ignore, logger=None):
     def decorator(func):
         def _should_retry(e):
-            # Retry on response truncation. This happens sometimes when fetching logs.
-            is_response_truncated = (e.status == 500 and isinstance(e.body, bytes) and b'EOF' in e.body)
+            if isinstance(e, ApiException):
+                # Retry on response truncation. This happens sometimes when fetching logs.
+                is_response_truncated = (e.status == 500 and isinstance(e.body, bytes) and b'EOF' in e.body)
 
-            # Retry on conflict with current cluster state. Workaround for:
-            # HTTP response headers:
-            # <CIMultiDictProxy('Audit-Id': '01fab989-6ce8-439a-bc55-b61145a0cf36', 'Content-Type': 'application/json',
-            # 'Date': 'Sat, 11 Jan 2020 17:09:22 GMT', 'Content-Length': '342')>HTTP
-            # response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",
-            # "message":"Operation cannot be fulfilled on resourcequotas \"gke-resource-quotas\": the object has been modified;
-            # please apply your changes to the latest version and try again","reason":"Conflict","details":{"name":"gke-resource-quotas","kind":"resourcequotas"},"code":409}
-            # TODO (jeev): This is a bandaid fix. We need a more reliable
-            #  solution.
-            is_gke_quota_conflict = (e.status == 409)
+                # Retry on conflict with current cluster state. Workaround for:
+                # HTTP response headers:
+                # <CIMultiDictProxy('Audit-Id': '01fab989-6ce8-439a-bc55-b61145a0cf36', 'Content-Type': 'application/json',
+                # 'Date': 'Sat, 11 Jan 2020 17:09:22 GMT', 'Content-Length': '342')>HTTP
+                # response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",
+                # "message":"Operation cannot be fulfilled on resourcequotas \"gke-resource-quotas\": the object has been modified;
+                # please apply your changes to the latest version and try again","reason":"Conflict","details":{"name":"gke-resource-quotas","kind":"resourcequotas"},"code":409}
+                # TODO (jeev): This is a bandaid fix. We need a more reliable
+                #  solution.
+                is_gke_quota_conflict = (e.status == 409)
 
-            # Retry on all 50X errors
-            is_50X_error = e.status > 500
-            is_known_api_exception = (isinstance(e, ApiException) and
-                                      (is_50X_error or is_response_truncated or is_gke_quota_conflict)
-                                      )
+                # Retry on all 50X errors
+                is_50X_error = e.status > 500
+                is_known_api_exception = (is_50X_error or is_response_truncated or is_gke_quota_conflict)
+            else:
+                is_known_api_exception = False
+
             retry_cond = (is_known_api_exception or isinstance(e, TimeoutError))
             if retry_cond:
                 if logger is not None:
