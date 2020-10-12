@@ -126,35 +126,15 @@ def _k8s_api_wrapper(*codes_to_ignore):
             if e.status == 429:
                 return True
 
-            # Retry on response truncation. This happens sometimes when fetching logs.
-            if e.status == 500:
-                logger.debug(f"ERROR BODY: isinstance(e.body, bytes)={isinstance(e.body, bytes)} {e.body} ")
-                if isinstance(e.body, bytes) and b"EOF" in e.body:
-                    return True
-
-                try:
-                    body_dict = json.loads(e.body)
-                except json.decoder.JSONDecodeError:
-                    return False
-                # ServerTimeout
-                # kubernetes_asyncio.client.exceptions.ApiException: (500)
-                # Reason: Internal Server Error
-                # HTTP response headers: <CIMultiDictProxy('Audit-Id': '75a14aca-9617-4cb4-9eb8-4d70e2b5844a', 'Content-Type': 'application/json', 'Date': 'Sat, 02 May 2020 14:16:22 GMT', 'Content-Length': '242')>
-                # HTTP response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"The POST operation against Pod could not be completed at this time, please try again.","reason":"ServerTimeout","details":{"name":"POST","kind":"Pod"},"code":500}
-                if body_dict["reason"] == "ServerTimeout":
-                    return True
-
-                return False
-
             # Retry on all 50X errors
-            return e.status > 500
+            return e.status >= 500
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             try:
                 retry_decorator = retry(
                     stop=stop_after_attempt(5),
-                    wait=wait_exponential(multiplier=1, min=1, max=10),
+                    wait=wait_exponential(multiplier=1, min=1, max=100),
                     retry=retry_if_exception(_should_retry),
                     before_sleep=before_sleep_log(logger, logging.WARNING)
                 )
