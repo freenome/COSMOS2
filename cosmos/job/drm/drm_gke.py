@@ -54,8 +54,8 @@ GKE_POD_UNKNOWN_STATUS = 'Unknown'
 DEFAULT_PV_STORAGE_CLASS = 'ssd'
 SCRATCH_VOLUME_MOUNT_PATH = '/scratch'
 LOGS_STREAM_CHUNK_SIZE = 128 * 1024  # 128 KB
-LOGS_CONNECTION_TIMEOUT = timedelta(seconds=3)
-LOGS_READ_TIMEOUT = timedelta(seconds=1)
+LOGS_CONNECTION_TIMEOUT = timedelta(seconds=10)
+LOGS_READ_TIMEOUT = timedelta(seconds=30)
 PREEMPTIBLE_NODE_LABEL = 'cloud.google.com/gke-preemptible'
 PREEMPTIBLE_START_GRACE_PERIOD = timedelta(hours=2)
 LONG_RUNNING_JOB_THRESHOLD = timedelta(hours=4)
@@ -133,8 +133,8 @@ def _k8s_api_wrapper(*codes_to_ignore):
         def wrapper(*args, **kwargs):
             try:
                 retry_decorator = retry(
-                    stop=stop_after_attempt(5),
-                    wait=wait_exponential(multiplier=1, min=1, max=100),
+                    stop=stop_after_attempt(10),
+                    wait=wait_exponential(multiplier=1, min=1, max=1025),
                     retry=retry_if_exception(_should_retry),
                     before_sleep=before_sleep_log(logger, logging.WARNING)
                 )
